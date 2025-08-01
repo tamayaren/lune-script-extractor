@@ -1,0 +1,18 @@
+# .robignore
+# Patterns for scripts or parent containers to ignore during extraction.
+# Syntax follows .gitignore conventions:
+#
+# - Comments start with '#'
+# - Ignore all scripts under a parent or ancestor folder:
+#   Cmdr
+#   Chat
+#
+# - Ignore a specific hierarchical path:
+#   StarterGui/Inventory
+#
+# - Ignore by script name or glob pattern:
+#   *.spec
+#   TestScript
+#
+# - Negation with '!' to re-include specific scripts:
+#   !Cmdr/Shared/Util
