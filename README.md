@@ -128,3 +128,8 @@ StarterGui/Inventory
 - **`.robignore`**: Configuration file specifying ignore patterns.
 - **`rokit.toml`**: Rokit toolchain manifest pinning the Lune version.
 - **`test.rbxl`**: Test Roblox place file for experimentation.
+
+---
+
+## Notes
+This is my tool originally developed in 2024 to extract scripts from big .rbxl files and for checking hidden backdoors. 
