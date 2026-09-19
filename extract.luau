@@ -1,11 +1,19 @@
 --!strict
-local fs = require("@lune/fs")
+local FileSystem = require("@lune/fs")
 local Roblox = require("@lune/roblox")
 local Process = require("@lune/process")
 local Stdio = require("@lune/stdio")
 
+type IgnoreRule = {
+	Raw: string,
+	IsNegated: boolean,
+	IsDirOnly: boolean,
+	HasSlash: boolean,
+	Pattern: string
+}
+
 local function PrintHelp()
-    print([==[
+	print([==[
 Usage:
     lune run extract.luau [place_file.rbxl] [output_dir] [options]
 
@@ -27,348 +35,354 @@ Examples:
 ]==])
 end
 
--- Parse CLI arguments
-local RbxlPath: string? = nil
-local CustomOutputDir: string? = nil
-local CustomIgnoreFile: string? = nil
-local OptDirect: boolean = false
-local OptRojoExt: boolean = false
-
-local RawArgs = {}
-for _, arg in Process.args do
-    if (arg ~= "--") then table.insert(RawArgs, arg) end
-end
-
-local ArgIdx = 1
-while (ArgIdx <= #RawArgs) do
-    local arg = RawArgs[ArgIdx]
-    if (arg == "-h" or arg == "--help") then
-        PrintHelp()
-        Process.exit(0)
-    elseif (arg == "--direct") then
-        OptDirect = true
-    elseif (arg == "--rojo-ext") then
-        OptRojoExt = true
-    elseif (arg == "--ignore-file") then
-        ArgIdx += 1
-        CustomIgnoreFile = RawArgs[ArgIdx]
-        if (not CustomIgnoreFile) then
-            Stdio.ewrite("Error: --ignore-file requires a file path argument.\n")
-            Process.exit(1)
-        end
-    elseif (string.sub(arg, 1, 1) == "-") then
-        Stdio.ewrite(string.format("Unknown option: %s\n", arg))
-        PrintHelp()
-        Process.exit(1)
-    elseif (RbxlPath == nil) then
-        RbxlPath = arg
-    elseif (CustomOutputDir == nil) then
-        CustomOutputDir = arg
-    else
-        Stdio.ewrite(string.format("Unexpected argument: %s\n", arg))
-        PrintHelp()
-        Process.exit(1)
-    end
-    ArgIdx += 1
-end
-
--- If no rbxl file provided, auto-detect in current directory
-if (RbxlPath == nil) then
-    local Candidates = {}
-    for _, File in fs.readDir(".") do
-        if (string.sub(File, -5) == ".rbxl" or string.sub(File, -6) == ".rbxlx") then
-            table.insert(Candidates, File)
-        end
-    end
-    if (#Candidates == 1) then
-        RbxlPath = Candidates[1]
-        print(string.format("[INFO] Auto-detected place file: %s", RbxlPath))
-    elseif (#Candidates > 1) then
-        Stdio.ewrite("Multiple .rbxl files found in current directory. Please specify one:\n")
-        for _, Candidate in Candidates do Stdio.ewrite("  - " .. Candidate .. "\n") end
-        Process.exit(1)
-    else
-        Stdio.ewrite("Error: No .rbxl place file specified and none found in current directory.\n")
-        PrintHelp()
-        Process.exit(1)
-    end
-end
-
--- Validate rbxl file existence
-if (not fs.isFile(RbxlPath)) then
-    Stdio.ewrite(string.format("Error: File '%s' does not exist.\n", RbxlPath))
-    Process.exit(1)
-end
-
 -- Extract base place name from file path
 local function GetFileStem(FilePath: string): string
-    local Normalized = string.gsub(FilePath, "\\", "/")
-    local FileName = string.match(Normalized, "[^/]+$") or Normalized
-    local Stem = string.gsub(FileName, "%.rbxlx?$", "")
-    return Stem
-end
-
-local PlaceStem = GetFileStem(RbxlPath)
-
--- Determine target output directory
-local TargetDir: string
-if (CustomOutputDir ~= nil) then
-    TargetDir = CustomOutputDir
-elseif (OptDirect) then
-    TargetDir = "output"
-else
-    TargetDir = "output/" .. PlaceStem
-end
-TargetDir = string.gsub(TargetDir, "\\", "/")
-TargetDir = string.gsub(TargetDir, "/+$", "")
-
-print(string.format("Opening '%s'...", RbxlPath))
-local StartTime = os.clock()
-
-local FileContent: string
-local ReadSuccess, ReadErr = pcall(function()
-    FileContent = fs.readFile(RbxlPath)
-end)
-if (not ReadSuccess or FileContent == nil) then
-    Stdio.ewrite(string.format("Error reading file '%s': %s\n", RbxlPath, tostring(ReadErr)))
-    Process.exit(1)
-end
-
-print(string.format("Deserializing place data (%.2f MB)...", #FileContent / (1024 * 1024)))
-local Game: any
-local DesSuccess, DesErr = pcall(function()
-    Game = Roblox.deserializePlace(FileContent)
-end)
-if (not DesSuccess or Game == nil) then
-    Stdio.ewrite(string.format("Error deserializing place: %s\n", tostring(DesErr)))
-    Process.exit(1)
+	local Normalized = string.gsub(FilePath, "\\", "/")
+	local FileName = string.match(Normalized, "[^/]+$") or Normalized
+	local Stem = string.gsub(FileName, "%.rbxlx?$", "")
+	return Stem
 end
 
 -- Helper to sanitize directory/file names for Windows and Unix filesystems
 local function SanitizeName(Name: string): string
-    local Sanitized = string.gsub(Name, '[<>:"/\\|?*\x00-\x1f]', "_")
-    Sanitized = string.gsub(Sanitized, "[%.%s]+$", "")
-    if (#Sanitized == 0) then Sanitized = "_unnamed" end
-    
-    local Upper = string.upper(Sanitized)
-    local Reserved = {
-        CON = true, PRN = true, AUX = true, NUL = true,
-        COM1 = true, COM2 = true, COM3 = true, COM4 = true,
-        COM5 = true, COM6 = true, COM7 = true, COM8 = true, COM9 = true,
-        LPT1 = true, LPT2 = true, LPT3 = true, LPT4 = true,
-        LPT5 = true, LPT6 = true, LPT7 = true, LPT8 = true, LPT9 = true,
-    }
-    if (Reserved[Upper]) then Sanitized ..= "_" end
-    return Sanitized
+	local Sanitized = string.gsub(Name, "[<>:\"/\\|?*\x00-\x1f]", "_")
+	Sanitized = string.gsub(Sanitized, "[%.%s]+$", "")
+	if (#Sanitized == 0) then Sanitized = "_unnamed" end
+
+	local Upper = string.upper(Sanitized)
+	local Reserved: {[string]: boolean} = {
+		CON = true,
+		PRN = true,
+		AUX = true,
+		NUL = true,
+		COM1 = true,
+		COM2 = true,
+		COM3 = true,
+		COM4 = true,
+		COM5 = true,
+		COM6 = true,
+		COM7 = true,
+		COM8 = true,
+		COM9 = true,
+		LPT1 = true,
+		LPT2 = true,
+		LPT3 = true,
+		LPT4 = true,
+		LPT5 = true,
+		LPT6 = true,
+		LPT7 = true,
+		LPT8 = true,
+		LPT9 = true
+	}
+	if (Reserved[Upper]) then Sanitized ..= "_" end
+	return Sanitized
 end
 
--- .robignore support
-type IgnoreRule = {
-    Raw: string,
-    IsNegated: boolean,
-    IsDirOnly: boolean,
-    HasSlash: boolean,
-    Pattern: string,
-}
-
 local function GlobToPattern(Glob: string): string
-    local Pattern = string.gsub(Glob, "([%%%^%$%(%)%%.%[%]%+%-])", "%%%1")
-    Pattern = string.gsub(Pattern, "%*", ".*")
-    Pattern = string.gsub(Pattern, "%?", ".")
-    return "^" .. Pattern .. "$"
+	local Pattern = string.gsub(Glob, "([%%%^%$%(%)%%.%[%]%+%-])", "%%%1")
+	Pattern = string.gsub(Pattern, "%*", ".*")
+	Pattern = string.gsub(Pattern, "%?", ".")
+	return "^" .. Pattern .. "$"
 end
 
 local function LoadRobIgnore(FilePath: string): {IgnoreRule}
-    local Rules = {}
-    if (not fs.isFile(FilePath)) then return Rules end
+	local Rules: {IgnoreRule} = {}
+	if (not FileSystem.isFile(FilePath)) then return Rules end
 
-    local Content = fs.readFile(FilePath)
-    for Line in string.gmatch(Content, "[^\r\n]+") do
-        Line = string.gsub(Line, "^%s+", "")
-        Line = string.gsub(Line, "%s+$", "")
-        if (#Line > 0 and string.sub(Line, 1, 1) ~= "#") then
-            local IsNegated = false
-            if (string.sub(Line, 1, 1) == "!") then
-                IsNegated = true
-                Line = string.sub(Line, 2)
-            end
-            local IsDirOnly = false
-            if (string.sub(Line, -1) == "/") then
-                IsDirOnly = true
-                Line = string.sub(Line, 1, -2)
-            end
-            local HasSlash = string.find(Line, "/") ~= nil
-            local RegexPattern = GlobToPattern(Line)
-            table.insert(Rules, {
-                Raw = Line,
-                IsNegated = IsNegated,
-                IsDirOnly = IsDirOnly,
-                HasSlash = HasSlash,
-                Pattern = RegexPattern,
-            })
-        end
-    end
-    return Rules
+	local Content = FileSystem.readFile(FilePath)
+	for Line in string.gmatch(Content, "[^\r\n]+") do
+		Line = string.gsub(Line, "^%s+", "")
+		Line = string.gsub(Line, "%s+$", "")
+		if (#Line == 0 or string.sub(Line, 1, 1) == "#") then continue end
+
+		local IsNegated = false
+		if (string.sub(Line, 1, 1) == "!") then
+			IsNegated = true
+			Line = string.sub(Line, 2)
+		end
+		local IsDirOnly = false
+		if (string.sub(Line, -1) == "/") then
+			IsDirOnly = true
+			Line = string.sub(Line, 1, -2)
+		end
+		local HasSlash = string.find(Line, "/") ~= nil
+		local RegexPattern = GlobToPattern(Line)
+		table.insert(Rules, {
+			Raw = Line,
+			IsNegated = IsNegated,
+			IsDirOnly = IsDirOnly,
+			HasSlash = HasSlash,
+			Pattern = RegexPattern
+		})
+	end
+	return Rules
 end
 
 local function ShouldIgnore(AncestorNames: {string}, ScriptName: string, Rules: {IgnoreRule}): (boolean, string?)
-    if (#Rules == 0) then return false, nil end
+	if (#Rules == 0) then return false, nil end
 
-    local FullDirPath = table.concat(AncestorNames, "/")
-    local FullPath = if (#FullDirPath > 0) then FullDirPath .. "/" .. ScriptName else ScriptName
-    local FullPathWithExt = FullPath .. ".luau"
-    local ImmediateParent = AncestorNames[#AncestorNames] or ""
+	local FullDirectoryPath = table.concat(AncestorNames, "/")
+	local FullPath = if (#FullDirectoryPath > 0) then FullDirectoryPath .. "/" .. ScriptName else ScriptName
+	local FullPathWithExt = FullPath .. ".luau"
+	local ImmediateParent = AncestorNames[#AncestorNames] or ""
 
-    local Ignored = false
-    local MatchedRule: string? = nil
+	local Ignored = false
+	local MatchedRule: string? = nil
 
-    for _, Rule in Rules do
-        local Matched = false
-        if (Rule.HasSlash) then
-            if (string.match(FullPath, Rule.Pattern)
-                or string.match(FullPathWithExt, Rule.Pattern)
-                or string.match(FullDirPath, Rule.Pattern)
-                or string.find(FullPath, Rule.Raw, 1, true)
-                or string.find(FullDirPath, Rule.Raw, 1, true)) then
-                Matched = true
-            end
-        else
-            if (string.match(ImmediateParent, Rule.Pattern) or ImmediateParent == Rule.Raw) then
-                Matched = true
-            else
-                for _, anc in AncestorNames do
-                    if (string.match(anc, Rule.Pattern) or anc == Rule.Raw) then
-                        Matched = true
-                        break
-                    end
-                end
-            end
-            if (not Matched and not Rule.IsDirOnly) then
-                if (string.match(ScriptName, Rule.Pattern)
-                    or string.match(ScriptName .. ".luau", Rule.Pattern)
-                    or ScriptName == Rule.Raw) then
-                    Matched = true
-                end
-            end
-        end
+	for _, Rule in ipairs(Rules) do
+		local Matched = false
+		if (Rule.HasSlash) then
+			if (string.match(FullPath, Rule.Pattern)
+				or string.match(FullPathWithExt, Rule.Pattern)
+				or string.match(FullDirectoryPath, Rule.Pattern)
+				or string.find(FullPath, Rule.Raw, 1, true)
+				or string.find(FullDirectoryPath, Rule.Raw, 1, true)) then
+				Matched = true
+			end
+		else
+			if (string.match(ImmediateParent, Rule.Pattern) or ImmediateParent == Rule.Raw) then
+				Matched = true
+			else
+				for _, AncestorName in pairs(AncestorNames) do
+					if (string.match(AncestorName, Rule.Pattern) or AncestorName == Rule.Raw) then
+						Matched = true
+						break
+					end
+				end
+			end
+			if (not Matched and not Rule.IsDirOnly) then
+				if (string.match(ScriptName, Rule.Pattern)
+					or string.match(ScriptName .. ".luau", Rule.Pattern)
+					or ScriptName == Rule.Raw) then
+					Matched = true
+				end
+			end
+		end
 
-        if (Matched) then
-            Ignored = not Rule.IsNegated
-            MatchedRule = Rule.Raw
-        end
-    end
+		if (Matched) then
+			Ignored = not Rule.IsNegated
+			MatchedRule = Rule.Raw
+		end
+	end
 
-    return Ignored, MatchedRule
+	return Ignored, MatchedRule
+end
+
+-- Parse CLI arguments
+local PlaceFilePath: string? = nil
+local CustomOutputDirectory: string? = nil
+local CustomIgnoreFile: string? = nil
+local UseDirectOutput: boolean = false
+local UseRojoExtensions: boolean = false
+
+local RawArguments: {string} = {}
+for _, Argument in ipairs(Process.args) do
+	if (Argument ~= "--") then table.insert(RawArguments, Argument) end
+end
+
+local ArgumentIndex = 1
+while (ArgumentIndex <= #RawArguments) do
+	local Argument = RawArguments[ArgumentIndex]
+	if (Argument == "-h" or Argument == "--help") then
+		PrintHelp()
+		Process.exit(0)
+	elseif (Argument == "--direct") then
+		UseDirectOutput = true
+	elseif (Argument == "--rojo-ext") then
+		UseRojoExtensions = true
+	elseif (Argument == "--ignore-file") then
+		ArgumentIndex += 1
+		CustomIgnoreFile = RawArguments[ArgumentIndex]
+		if (not CustomIgnoreFile) then
+			Stdio.ewrite("Error: --ignore-file requires a file path argument.\n")
+			Process.exit(1)
+		end
+	elseif (string.sub(Argument, 1, 1) == "-") then
+		Stdio.ewrite(`Unknown option: {Argument}\n`)
+		PrintHelp()
+		Process.exit(1)
+	elseif (PlaceFilePath == nil) then
+		PlaceFilePath = Argument
+	elseif (CustomOutputDirectory == nil) then
+		CustomOutputDirectory = Argument
+	else
+		Stdio.ewrite(`Unexpected argument: {Argument}\n`)
+		PrintHelp()
+		Process.exit(1)
+	end
+	ArgumentIndex += 1
+end
+
+-- If no rbxl file provided, auto-detect in current directory
+if (PlaceFilePath == nil) then
+	local Candidates: {string} = {}
+	for _, File in pairs(FileSystem.readDir(".")) do
+		if (string.sub(File, -5) == ".rbxl" or string.sub(File, -6) == ".rbxlx") then
+			table.insert(Candidates, File)
+		end
+	end
+	if (#Candidates == 1) then
+		PlaceFilePath = Candidates[1]
+		print(`[INFO] Auto-detected place file: {PlaceFilePath}`)
+	elseif (#Candidates > 1) then
+		Stdio.ewrite("Multiple .rbxl files found in current directory. Please specify one:\n")
+		for _, Candidate in ipairs(Candidates) do Stdio.ewrite("  - " .. Candidate .. "\n") end
+		Process.exit(1)
+	else
+		Stdio.ewrite("Error: No .rbxl place file specified and none found in current directory.\n")
+		PrintHelp()
+		Process.exit(1)
+	end
+end
+
+-- Validate rbxl file existence
+if (not FileSystem.isFile(PlaceFilePath)) then
+	Stdio.ewrite(`Error: File '{PlaceFilePath}' does not exist.\n`)
+	Process.exit(1)
+end
+
+local PlaceStem = GetFileStem(PlaceFilePath)
+
+-- Determine target output directory
+local TargetDirectory = if (CustomOutputDirectory ~= nil) then CustomOutputDirectory
+	elseif (UseDirectOutput) then "output"
+	else "output/" .. PlaceStem
+TargetDirectory = string.gsub(TargetDirectory, "\\", "/")
+TargetDirectory = string.gsub(TargetDirectory, "/+$", "")
+
+print(`Opening '{PlaceFilePath}'...`)
+local StartTime = os.clock()
+
+local FileContent: string
+local ReadSuccess, ReadMessage = pcall(function()
+	FileContent = FileSystem.readFile(PlaceFilePath)
+end)
+if (not ReadSuccess or FileContent == nil) then
+	Stdio.ewrite(`Error reading file '{PlaceFilePath}': {tostring(ReadMessage)}\n`)
+	Process.exit(1)
+end
+
+print(`Deserializing place data ({string.format("%.2f", #FileContent / (1024 * 1024))} MB)...`)
+local Game: Roblox.Instance
+local DeserializeSuccess, DeserializeMessage = pcall(function()
+	Game = Roblox.deserializePlace(FileContent)
+end)
+if (not DeserializeSuccess or Game == nil) then
+	Stdio.ewrite(`Error deserializing place: {tostring(DeserializeMessage)}\n`)
+	Process.exit(1)
 end
 
 -- Locate and load .robignore
 local RobIgnorePath: string? = nil
 if (CustomIgnoreFile ~= nil) then
-    if (fs.isFile(CustomIgnoreFile)) then
-        RobIgnorePath = CustomIgnoreFile
-    else
-        Stdio.ewrite(string.format("Warning: Specified ignore file '%s' does not exist.\n", CustomIgnoreFile))
-    end
-elseif (fs.isFile(".robignore")) then
-    RobIgnorePath = ".robignore"
+	if (FileSystem.isFile(CustomIgnoreFile)) then
+		RobIgnorePath = CustomIgnoreFile
+	else
+		Stdio.ewrite(`Warning: Specified ignore file '{CustomIgnoreFile}' does not exist.\n`)
+	end
+elseif (FileSystem.isFile(".robignore")) then
+	RobIgnorePath = ".robignore"
 else
-    local ParentOfRbxl = string.match(RbxlPath, "^(.*)[/\\][^/\\]+$")
-    if (ParentOfRbxl and fs.isFile(ParentOfRbxl .. "/.robignore")) then
-        RobIgnorePath = ParentOfRbxl .. "/.robignore"
-    end
+	local PlaceDirectory = string.match(PlaceFilePath, "^(.*)[/\\][^/\\]+$")
+	if (PlaceDirectory and FileSystem.isFile(PlaceDirectory .. "/.robignore")) then
+		RobIgnorePath = PlaceDirectory .. "/.robignore"
+	end
 end
 
 local RobIgnoreRules: {IgnoreRule} = {}
 if (RobIgnorePath ~= nil) then
-    RobIgnoreRules = LoadRobIgnore(RobIgnorePath)
-    print(string.format("[INFO] Loaded ignore file '%s' (%d rule%s)", RobIgnorePath, #RobIgnoreRules, if (#RobIgnoreRules == 1) then "" else "s"))
+	RobIgnoreRules = LoadRobIgnore(RobIgnorePath)
+	print(
+		`[INFO] Loaded ignore file '{RobIgnorePath}' ({#RobIgnoreRules} rule{if (#RobIgnoreRules == 1) then "" else "s"})`
+	)
 end
 
 -- Ensure target directory exists
-if (not fs.isDir(TargetDir)) then fs.writeDir(TargetDir) end
+if (not FileSystem.isDir(TargetDirectory)) then FileSystem.writeDir(TargetDirectory) end
 
 -- Find all scripts
-local ScriptCounts = {
-    ModuleScript = 0,
-    Script = 0,
-    LocalScript = 0,
-    Total = 0,
+local ScriptCounts: {[string]: number} = {
+	ModuleScript = 0,
+	Script = 0,
+	LocalScript = 0,
+	Total = 0
 }
 
-local WrittenPaths: { [string]: boolean } = {}
+local WrittenPaths: {[string]: boolean} = {}
 local DuplicateCount = 0
 local IgnoredCount = 0
 
 print("Traversing place hierarchy and extracting scripts...")
 
-for _, Desc in Game:GetDescendants() do
-    local ClassName = Desc.ClassName
-    if (ClassName == "ModuleScript" or ClassName == "Script" or ClassName == "LocalScript") then
-        local RawAncestors = {}
-        local PathSegments = {}
-        local Curr = Desc.Parent
-        while (Curr and Curr ~= Game) do
-            table.insert(RawAncestors, 1, Curr.Name)
-            table.insert(PathSegments, 1, SanitizeName(Curr.Name))
-            Curr = Curr.Parent
-        end
+for _, Descendant in ipairs(Game:GetDescendants()) do
+	local ClassName = Descendant.ClassName
+	if (ClassName ~= "ModuleScript" and ClassName ~= "Script" and ClassName ~= "LocalScript") then continue end
 
-        local Ignored, _ = ShouldIgnore(RawAncestors, Desc.Name, RobIgnoreRules)
-        if (Ignored) then
-            IgnoredCount += 1
-            continue
-        end
+	local RawAncestors: {string} = {}
+	local PathSegments: {string} = {}
+	local CurrentAncestor = Descendant.Parent
+	while (CurrentAncestor and CurrentAncestor ~= Game) do
+		table.insert(RawAncestors, 1, CurrentAncestor.Name)
+		table.insert(PathSegments, 1, SanitizeName(CurrentAncestor.Name))
+		CurrentAncestor = CurrentAncestor.Parent
+	end
 
-        ScriptCounts.Total += 1
-        if (ScriptCounts[ClassName] ~= nil) then ScriptCounts[ClassName] += 1 end
+	local Ignored, _ = ShouldIgnore(RawAncestors, Descendant.Name, RobIgnoreRules)
+	if (Ignored) then
+		IgnoredCount += 1
+		continue
+	end
 
-        local ScriptName = SanitizeName(Desc.Name)
-        local RelDirPath = table.concat(PathSegments, "/")
-        local FullDirPath = if (#RelDirPath > 0) then TargetDir .. "/" .. RelDirPath else TargetDir
+	ScriptCounts.Total += 1
+	if (ScriptCounts[ClassName] ~= nil) then ScriptCounts[ClassName] += 1 end
 
-        if (not fs.isDir(FullDirPath)) then fs.writeDir(FullDirPath) end
+	local ScriptName = SanitizeName(Descendant.Name)
+	local RelativeDirectoryPath = table.concat(PathSegments, "/")
+	local FullDirectoryPath = if (#RelativeDirectoryPath > 0) then TargetDirectory .. "/" .. RelativeDirectoryPath
+		else TargetDirectory
 
-        local FileExt = ".luau"
-        if (OptRojoExt) then
-            if (ClassName == "Script") then
-                FileExt = ".server.luau"
-            elseif (ClassName == "LocalScript") then
-                FileExt = ".client.luau"
-            else
-                FileExt = ".luau"
-            end
-        end
+	if (not FileSystem.isDir(FullDirectoryPath)) then FileSystem.writeDir(FullDirectoryPath) end
 
-        local BaseFileName = ScriptName .. FileExt
-        local TargetFilePath = FullDirPath .. "/" .. BaseFileName
+	local FileExtension = ".luau"
+	if (UseRojoExtensions) then
+		if (ClassName == "Script") then
+			FileExtension = ".server.luau"
+		elseif (ClassName == "LocalScript") then
+			FileExtension = ".client.luau"
+		else
+			FileExtension = ".luau"
+		end
+	end
 
-        if (WrittenPaths[TargetFilePath]) then
-            DuplicateCount += 1
-            local Counter = 1
-            repeat
-                local AltFileName = string.format("%s (%d)%s", ScriptName, Counter, FileExt)
-                TargetFilePath = FullDirPath .. "/" .. AltFileName
-                Counter += 1
-            until not WrittenPaths[TargetFilePath]
-            print(string.format("  [!] Resolved collision for %s -> %s", BaseFileName, TargetFilePath))
-        end
+	local BaseFileName = ScriptName .. FileExtension
+	local TargetFilePath = FullDirectoryPath .. "/" .. BaseFileName
 
-        WrittenPaths[TargetFilePath] = true
+	if (WrittenPaths[TargetFilePath]) then
+		DuplicateCount += 1
+		local Counter = 1
+		repeat
+			local AlternateFileName = `{ScriptName} ({Counter}){FileExtension}`
+			TargetFilePath = FullDirectoryPath .. "/" .. AlternateFileName
+			Counter += 1
+		until not WrittenPaths[TargetFilePath]
+		print(`  [!] Resolved collision for {BaseFileName} -> {TargetFilePath}`)
+	end
 
-        local Source = Desc.Source or ""
-        fs.writeFile(TargetFilePath, Source)
-    end
+	WrittenPaths[TargetFilePath] = true
+
+	local Source = Descendant.Source or ""
+	FileSystem.writeFile(TargetFilePath, Source)
 end
 
 local Elapsed = os.clock() - StartTime
 
 print("--------------------------------------------------")
-print(string.format("Extraction completed in %.2f seconds!", Elapsed))
-print(string.format("Output directory: %s", TargetDir))
-print(string.format("Total scripts extracted: %d", ScriptCounts.Total))
-print(string.format("  - ModuleScripts: %d", ScriptCounts.ModuleScript))
-print(string.format("  - Server Scripts: %d", ScriptCounts.Script))
-print(string.format("  - LocalScripts:  %d", ScriptCounts.LocalScript))
-if (IgnoredCount > 0) then print(string.format("  - Ignored (.robignore): %d", IgnoredCount)) end
-if (DuplicateCount > 0) then print(string.format("  - Name collisions resolved: %d", DuplicateCount)) end
+print(`Extraction completed in {string.format("%.2f", Elapsed)} seconds!`)
+print(`Output directory: {TargetDirectory}`)
+print(`Total scripts extracted: {ScriptCounts.Total}`)
+print(`  - ModuleScripts: {ScriptCounts.ModuleScript}`)
+print(`  - Server Scripts: {ScriptCounts.Script}`)
+print(`  - LocalScripts:  {ScriptCounts.LocalScript}`)
+if (IgnoredCount > 0) then print(`  - Ignored (.robignore): {IgnoredCount}`) end
+if (DuplicateCount > 0) then print(`  - Name collisions resolved: {DuplicateCount}`) end
 print("--------------------------------------------------")
